@@ -2,7 +2,7 @@ from torch import add
 from torch import nn
 
 
-class SepResNet50v2(nn.Module):
+class SepResNet50(nn.Module):
     def __init__(self, input_shape, num_classes):
         super().__init__()
 
@@ -48,7 +48,7 @@ class SepResNet50v2(nn.Module):
         return x
 
 
-class SepResNet101v2(nn.Module):
+class SepResNet101(nn.Module):
     def __init__(self, input_shape, num_classes):
         super().__init__()
 
@@ -86,7 +86,7 @@ class SepResNet101v2(nn.Module):
         return x
 
 
-class SepResNet152v2(nn.Module):
+class SepResNet152(nn.Module):
     def __init__(self, input_shape, num_classes):
         super().__init__()
 
