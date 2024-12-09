@@ -6,8 +6,10 @@ class SepResNetClassifier(nn.Module):
     def __init__(self, shape: str, num_classes=None):
         super().__init__()
         self.encoder = SepResNetEncoder(shape)
-        if num_classes is not None:
-            self.classifier = ClassificationHead(num_classes)
+        if (num_classes is not None) & (shape in ['50', '101', '152']): # output channels: 2048
+            self.classifier = LargeClassificationHead(num_classes)
+        elif (num_classes is not None): # output channels: 512
+            self.classifier = SmallClassificationHead(num_classes)
         else:
             self.classifier = nn.Identity()
 
@@ -17,33 +19,66 @@ class SepResNetClassifier(nn.Module):
         return x
 
 
-class ClassificationHead(nn.Module):
+class SmallClassificationHead(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
-        self.sep_conv_3x3_s2_1 = DepthwiseSeparableConv2d(
-            256, 128, 
+        self.conv_1 = DepthwiseSeparableConv2d(
+            512, 128, 
             kernel_size=3, stride=2, padding='same'
         )
-        self.sep_conv_3x3_s2_2 = DepthwiseSeparableConv2d(
-            128, 64, 
+        self.conv_2 = DepthwiseSeparableConv2d(
+            128, 32, 
             kernel_size=3, stride=2, padding='same'
         )
-
+        self.ga_pool = nn.AdaptiveAvgPool2d(1)
         self.flat = nn.Flatten()
-        self.dense_1 = nn.LazyLinear(32)
-        self.dense_out = nn.Linear(32, num_classes)
+        self.linear = nn.Linear(32, num_classes)
 
     def forward(self, x):
         # reduce dimensions
-        x = self.sep_conv_3x3_s2_1(x)
-        x = self.sep_conv_3x3_s2_2(x)
+        x = self.conv_1(x)
+        x = self.conv_2(x)
+        x = self.ga_pool(x)
 
         # flatten output
         x = self.flat(x)
 
-        # fully connected layers with sigmoid activation
-        x = self.dense_1(x)
-        x = self.dense_out(x)
+        # fully connected layers
+        x = self.linear(x)
+        return x # output raw logits
+
+
+class LargeClassificationHead(nn.Module):
+    def __init__(self, num_classes):
+        super().__init__()
+        self.conv_1 = DepthwiseSeparableConv2d(
+            2048, 512, 
+            kernel_size=3, stride=1, padding='same'
+        )
+        self.conv_2 = DepthwiseSeparableConv2d(
+            512, 128, 
+            kernel_size=3, stride=2, padding='same'
+        )
+        self.conv_3 = DepthwiseSeparableConv2d(
+            128, 32, 
+            kernel_size=3, stride=2, padding='same'
+        )
+        self.ga_pool = nn.AdaptiveAvgPool2d(1)
+        self.flat = nn.Flatten()
+        self.linear = nn.Linear(32, num_classes)
+
+    def forward(self, x):
+        # reduce dimensions
+        x = self.conv_1(x)
+        x = self.conv_2(x)
+        x = self.conv_3(x)
+        x = self.ga_pool(x)
+
+        # flatten output
+        x = self.flat(x)
+
+        # fully connected layers
+        x = self.linear(x)
         return x # output raw logits
 
 
@@ -83,8 +118,8 @@ class SepResNetEncoder(nn.Module):
     def __init__(self, shape: str):
         super().__init__()
         self.conv_1 = DepthwiseSeparableConv2d(
-            3, 32, kernel_size=7, 
-            stride=2, padding=3 # hardcoded as 3
+            3, 64, kernel_size=7, 
+            stride=2, padding='same'
         )
         self.max_pool = nn.MaxPool2d(
             3, stride=2, padding=1
@@ -99,7 +134,7 @@ class SepResNetEncoder(nn.Module):
     def forward(self, x):
         x = self.conv_1(x)
         x = self.max_pool(x)
-
+        
         x = self.block_1(x)
         x = self.block_2(x)
         x = self.block_3(x)
@@ -135,10 +170,11 @@ class ResidualSubBlock(nn.Module):
         else:
             self.main = StandardMainPath(in_channels, out_channels, stride, dilation)
 
-        if stride == 1: # don't place a convolution in the shortcut path for identity blocks
+        if (in_channels != out_channels) | (stride != 1): # otherwise, if strided block adjust n channels with a 1x1 conv
+            # this is how it's done by keras (i think?) but weirdly it does discard 75% of the data with stride 2
+            self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride)
+        else: # don't place a convolution in the shortcut path for identity blocks
             self.shortcut = nn.Identity()
-        else: # otherwise, if strided block adjust n channels with a 1x1 conv
-            self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x):
         main_x = self.main(x)
@@ -149,17 +185,17 @@ class ResidualSubBlock(nn.Module):
 
 class BottleneckMainPath(nn.Module):
     def __init__(self, in_channels, mid_channels, out_channels, stride, dilation):
-        super().__init__(self)
-        self.bn_1 = nn.BatchNorm2d(in_channels),
-        self.act_1 = nn.ReLU(),
+        super().__init__()
+        self.bn_1 = nn.BatchNorm2d(in_channels)
+        self.act_1 = nn.ReLU()
         self.conv_1 = nn.Conv2d(in_channels, mid_channels, kernel_size=1)
 
-        self.bn_2 = nn.BatchNorm2d(mid_channels),
-        self.act_2 = nn.ReLU(),
+        self.bn_2 = nn.BatchNorm2d(mid_channels)
+        self.act_2 = nn.ReLU()
         self.conv_2 = DepthwiseSeparableConv2d(mid_channels, mid_channels, kernel_size=3, stride=stride, dilation=dilation)
 
-        self.bn_3 = nn.BatchNorm2d(mid_channels),
-        self.act_3 = nn.ReLU(),
+        self.bn_3 = nn.BatchNorm2d(mid_channels)
+        self.act_3 = nn.ReLU()
         self.conv_3 = nn.Conv2d(mid_channels, out_channels, kernel_size=1)
 
     def forward(self, x):
@@ -179,13 +215,13 @@ class BottleneckMainPath(nn.Module):
 
 class StandardMainPath(nn.Module):
     def __init__(self, in_channels, out_channels, stride, dilation):
-        super().__init__(self)
-        self.bn_1 = nn.BatchNorm2d(in_channels),
-        self.act_1 = nn.ReLU(),
+        super().__init__()
+        self.bn_1 = nn.BatchNorm2d(in_channels)
+        self.act_1 = nn.ReLU()
         self.conv_1 = DepthwiseSeparableConv2d(in_channels, out_channels, kernel_size=3, stride=stride, dilation=dilation, padding='same')
 
-        self.bn_2 = nn.BatchNorm2d(out_channels),
-        self.act_2 = nn.ReLU(),
+        self.bn_2 = nn.BatchNorm2d(out_channels)
+        self.act_2 = nn.ReLU()
         self.conv_2 = DepthwiseSeparableConv2d(out_channels, out_channels, kernel_size=3, padding='same')
 
     def forward(self, x):
@@ -282,4 +318,4 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"unrecognized model version '{version}', please choose from [18, 34, 50, 101, 152]")
     
-    print(summary(model, input_size=(32,) + input_shape))
+    print(summary(model, input_size=(1,) + input_shape))
