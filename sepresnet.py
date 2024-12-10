@@ -1,13 +1,27 @@
 from torch import add
 from torch import nn
+from typing import Optional
 
 
 class SepResNetClassifier(nn.Module):
-    def __init__(self, shape: str, num_classes=None):
+    _arch: Optional[dict] = None
+    _out_channels: Optional[int] = None
+    
+    def __init__(self, num_classes=None):
         super().__init__()
-        self.encoder = SepResNetEncoder(shape)
-        if num_classes is not None: # output channels: 512
-            self.classifier = ClassificationHead(self.encoder._out_channels, num_classes)
+        
+        # ensure params are defined by subclasses
+        if self._arch is None:
+            raise ValueError("Subclasses must define '_arch'")
+        if self._out_channels is None:
+            raise ValueError("Subclasses must define '_out_channels'")
+
+        # init encoder
+        self.encoder = SepResNetEncoder(self._arch, self._out_channels)
+
+        # init classification head (or replace with identity placeholder)
+        if num_classes is not None:
+            self.classifier = ClassificationHead(self._out_channels, num_classes)
         else:
             self.classifier = nn.Identity()
 
@@ -17,68 +31,18 @@ class SepResNetClassifier(nn.Module):
         return x
 
 
-class ClassificationHead(nn.Module):
-    def __init__(self, encoder_out_channels, num_classes):
-        super().__init__()
-        conv_list = []
-        if encoder_out_channels != 512:
-            conv_list.append(DepthwiseSeparableConv2d(encoder_out_channels, 512, kernel_size=3, stride=1, padding='same'))
-        conv_list.append(DepthwiseSeparableConv2d(512, 128, kernel_size=3, stride=2, padding='same'))
-        conv_list.append(DepthwiseSeparableConv2d(128, 32, kernel_size=3, stride=2, padding='same'))
-        self.conv_layers = nn.Sequential(conv_list)
-        
-        self.ga_pool = nn.AdaptiveAvgPool2d(1)
-        self.flat = nn.Flatten()
-        self.linear = nn.Linear(32, num_classes)
-
-    def forward(self, x):
-        # reduce dimensions
-        x = self.conv_layers(x)
-        x = self.ga_pool(x)
-
-        # flatten output
-        x = self.flat(x)
-
-        # fully connected layers
-        x = self.linear(x)
-        return x # output raw logits
-
-
 class SepResNetEncoder(nn.Module):
-    _archs = {
-        "18": {
-            "block_1": {"in_channels":64, "out_channels":64, "n_blocks":2}, 
-            "block_2": {"in_channels":64, "out_channels":128, "n_blocks":2, "stride":2}, 
-            "block_3": {"in_channels":128, "out_channels":256, "n_blocks":2, "stride":2}, 
-            "block_4": {"in_channels":256, "out_channels":512, "n_blocks":2, "stride":2}
-        },
-        "34": {
-            "block_1": {"in_channels":64, "out_channels":64, "n_blocks":3}, 
-            "block_2": {"in_channels":64, "out_channels":128, "n_blocks":4, "stride":2}, 
-            "block_3": {"in_channels":128, "out_channels":256, "n_blocks":6, "stride":2}, 
-            "block_4": {"in_channels":256, "out_channels":512, "n_blocks":3, "stride":2}
-        },
-        "50": {
-            "block_1": {"in_channels":64, "mid_channels":64, "out_channels":256, "n_blocks":3}, 
-            "block_2": {"in_channels":256, "mid_channels":128,  "out_channels":512, "n_blocks":4, "stride":2}, 
-            "block_3": {"in_channels":512, "mid_channels":256,  "out_channels":1024, "n_blocks":6, "stride":2}, 
-            "block_4": {"in_channels":1024, "mid_channels":512,  "out_channels":2048, "n_blocks":3, "stride":2}
-        },
-        "101": {
-            "block_1": {"in_channels":64, "mid_channels":64, "out_channels":256, "n_blocks":3}, 
-            "block_2": {"in_channels":256, "mid_channels":128,  "out_channels":512, "n_blocks":4, "stride":2}, 
-            "block_3": {"in_channels":512, "mid_channels":256,  "out_channels":1024, "n_blocks":23, "stride":2}, 
-            "block_4": {"in_channels":1024, "mid_channels":512,  "out_channels":2048, "n_blocks":3, "stride":2}
-        },
-        "152": {
-            "block_1": {"in_channels":64, "mid_channels":64, "out_channels":256, "n_blocks":3}, 
-            "block_2": {"in_channels":256, "mid_channels":128,  "out_channels":512, "n_blocks":8, "stride":2}, 
-            "block_3": {"in_channels":512, "mid_channels":256,  "out_channels":1024, "n_blocks":36, "stride":2}, 
-            "block_4": {"in_channels":1024, "mid_channels":512,  "out_channels":2048, "n_blocks":3, "stride":2}
-        },
-    }
-    def __init__(self, shape: str):
+    def __init__(self, arch_dict, out_channels):
+        """
+        _arch should be a dictionary defining the architecture of the SRN encoder.
+        see one of the 
+        """
         super().__init__()
+        # record params to self
+        self._arch = arch_dict
+        self._out_channels = out_channels
+
+        # define input conv and max pool
         self.conv_1 = DepthwiseSeparableConv2d(
             3, 64, kernel_size=7, 
             stride=2, padding='same'
@@ -86,23 +50,80 @@ class SepResNetEncoder(nn.Module):
         self.max_pool = nn.MaxPool2d(
             3, stride=2, padding=1
         )
-        arch_dict = self._archs[shape]
 
+        # define residual blocks
         self.block_1 = ResidualBlock(**arch_dict["block_1"])
         self.block_2 = ResidualBlock(**arch_dict["block_2"])
         self.block_3 = ResidualBlock(**arch_dict["block_3"])
         self.block_4 = ResidualBlock(**arch_dict["block_4"])
-        self._out_channels = arch_dict["block_4"]["out_channels"]
+
 
     def forward(self, x):
+        # input layers
         x = self.conv_1(x)
         x = self.max_pool(x)
-        
+        # residual blocks
         x = self.block_1(x)
         x = self.block_2(x)
         x = self.block_3(x)
         x = self.block_4(x)
         return x
+
+
+class SepResNet18(SepResNetClassifier):
+    _arch = {
+        "block_1": {"in_channels":64, "out_channels":64, "n_blocks":2}, 
+        "block_2": {"in_channels":64, "out_channels":128, "n_blocks":2, "stride":2}, 
+        "block_3": {"in_channels":128, "out_channels":256, "n_blocks":2, "stride":2}, 
+        "block_4": {"in_channels":256, "out_channels":512, "n_blocks":2, "stride":2}
+    }
+    _out_channels = 512
+    def __init__(self, num_classes=None):
+        super().__init__()
+
+class SepResNet34(SepResNetClassifier):
+    _arch = {
+        "block_1": {"in_channels":64, "out_channels":64, "n_blocks":3}, 
+        "block_2": {"in_channels":64, "out_channels":128, "n_blocks":4, "stride":2}, 
+        "block_3": {"in_channels":128, "out_channels":256, "n_blocks":6, "stride":2}, 
+        "block_4": {"in_channels":256, "out_channels":512, "n_blocks":3, "stride":2}
+    }
+    _out_channels = 512
+    def __init__(self, num_classes=None):
+        super().__init__()
+
+class SepResNet50(SepResNetClassifier):
+    _arch = {
+        "block_1": {"in_channels":64, "mid_channels":64, "out_channels":256, "n_blocks":3}, 
+        "block_2": {"in_channels":256, "mid_channels":128,  "out_channels":512, "n_blocks":4, "stride":2}, 
+        "block_3": {"in_channels":512, "mid_channels":256,  "out_channels":1024, "n_blocks":6, "stride":2}, 
+        "block_4": {"in_channels":1024, "mid_channels":512,  "out_channels":2048, "n_blocks":3, "stride":2}
+    }
+    _out_channels = 2048
+    def __init__(self, num_classes=None):
+        super().__init__()
+
+class SepResNet101(SepResNetClassifier):
+    _arch = {
+        "block_1": {"in_channels":64, "mid_channels":64, "out_channels":256, "n_blocks":3}, 
+        "block_2": {"in_channels":256, "mid_channels":128,  "out_channels":512, "n_blocks":4, "stride":2}, 
+        "block_3": {"in_channels":512, "mid_channels":256,  "out_channels":1024, "n_blocks":23, "stride":2}, 
+        "block_4": {"in_channels":1024, "mid_channels":512,  "out_channels":2048, "n_blocks":3, "stride":2}
+    }
+    _out_channels = 2048
+    def __init__(self, num_classes=None):
+        super().__init__()
+
+class SepResNet152(SepResNetClassifier):
+    _arch = {
+        "block_1": {"in_channels":64, "mid_channels":64, "out_channels":256, "n_blocks":3}, 
+        "block_2": {"in_channels":256, "mid_channels":128,  "out_channels":512, "n_blocks":8, "stride":2}, 
+        "block_3": {"in_channels":512, "mid_channels":256,  "out_channels":1024, "n_blocks":36, "stride":2}, 
+        "block_4": {"in_channels":1024, "mid_channels":512,  "out_channels":2048, "n_blocks":3, "stride":2}
+    }
+    _out_channels = 2048
+    def __init__(self, num_classes=None):
+        super().__init__()
 
 
 class ResidualBlock(nn.Module):
@@ -228,25 +249,31 @@ class DepthwiseSeparableConv2d(nn.Module):
         return(x)
 
 
-class SepResNet18(SepResNetClassifier):
-    def __init__(self, num_classes=None):
-        super().__init__("18", num_classes)
+class ClassificationHead(nn.Module):
+    def __init__(self, encoder_out_channels, num_classes):
+        super().__init__()
+        conv_list = []
+        if encoder_out_channels != 512:
+            conv_list.append(DepthwiseSeparableConv2d(encoder_out_channels, 512, kernel_size=3, stride=1, padding='same'))
+        conv_list.append(DepthwiseSeparableConv2d(512, 128, kernel_size=3, stride=2, padding='same'))
+        conv_list.append(DepthwiseSeparableConv2d(128, 32, kernel_size=3, stride=2, padding='same'))
+        self.conv_layers = nn.Sequential(conv_list)
+        
+        self.ga_pool = nn.AdaptiveAvgPool2d(1)
+        self.flat = nn.Flatten()
+        self.linear = nn.Linear(32, num_classes)
 
-class SepResNet34(SepResNetClassifier):
-    def __init__(self, num_classes=None):
-        super().__init__("34", num_classes)
+    def forward(self, x):
+        # reduce dimensions
+        x = self.conv_layers(x)
+        x = self.ga_pool(x)
 
-class SepResNet50(SepResNetClassifier):
-    def __init__(self, num_classes=None):
-        super().__init__("50", num_classes)
+        # flatten output
+        x = self.flat(x)
 
-class SepResNet101(SepResNetClassifier):
-    def __init__(self, num_classes=None):
-        super().__init__("101", num_classes)
-
-class SepResNet152(SepResNetClassifier):
-    def __init__(self, num_classes=None):
-        super().__init__("152", num_classes)
+        # fully connected layers
+        x = self.linear(x)
+        return x # output raw logits
 
 
 if __name__ == "__main__":
@@ -281,4 +308,4 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"unrecognized model version '{version}', please choose from [18, 34, 50, 101, 152]")
     
-    print(summary(model, input_size=(1,) + input_shape))
+    summary(model, input_size=(1,) + input_shape)
