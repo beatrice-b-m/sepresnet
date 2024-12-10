@@ -6,10 +6,8 @@ class SepResNetClassifier(nn.Module):
     def __init__(self, shape: str, num_classes=None):
         super().__init__()
         self.encoder = SepResNetEncoder(shape)
-        if (num_classes is not None) & (shape in ['50', '101', '152']): # output channels: 2048
-            self.classifier = LargeClassificationHead(num_classes)
-        elif (num_classes is not None): # output channels: 512
-            self.classifier = SmallClassificationHead(num_classes)
+        if num_classes is not None: # output channels: 512
+            self.classifier = ClassificationHead(self.encoder._out_channels, num_classes)
         else:
             self.classifier = nn.Identity()
 
@@ -19,59 +17,23 @@ class SepResNetClassifier(nn.Module):
         return x
 
 
-class SmallClassificationHead(nn.Module):
-    def __init__(self, num_classes):
+class ClassificationHead(nn.Module):
+    def __init__(self, encoder_out_channels, num_classes):
         super().__init__()
-        self.conv_1 = DepthwiseSeparableConv2d(
-            512, 128, 
-            kernel_size=3, stride=2, padding='same'
-        )
-        self.conv_2 = DepthwiseSeparableConv2d(
-            128, 32, 
-            kernel_size=3, stride=2, padding='same'
-        )
+        conv_list = []
+        if encoder_out_channels != 512:
+            conv_list.append(DepthwiseSeparableConv2d(encoder_out_channels, 512, kernel_size=3, stride=1, padding='same'))
+        conv_list.append(DepthwiseSeparableConv2d(512, 128, kernel_size=3, stride=2, padding='same'))
+        conv_list.append(DepthwiseSeparableConv2d(128, 32, kernel_size=3, stride=2, padding='same'))
+        self.conv_layers = nn.Sequential(conv_list)
+        
         self.ga_pool = nn.AdaptiveAvgPool2d(1)
         self.flat = nn.Flatten()
         self.linear = nn.Linear(32, num_classes)
 
     def forward(self, x):
         # reduce dimensions
-        x = self.conv_1(x)
-        x = self.conv_2(x)
-        x = self.ga_pool(x)
-
-        # flatten output
-        x = self.flat(x)
-
-        # fully connected layers
-        x = self.linear(x)
-        return x # output raw logits
-
-
-class LargeClassificationHead(nn.Module):
-    def __init__(self, num_classes):
-        super().__init__()
-        self.conv_1 = DepthwiseSeparableConv2d(
-            2048, 512, 
-            kernel_size=3, stride=1, padding='same'
-        )
-        self.conv_2 = DepthwiseSeparableConv2d(
-            512, 128, 
-            kernel_size=3, stride=2, padding='same'
-        )
-        self.conv_3 = DepthwiseSeparableConv2d(
-            128, 32, 
-            kernel_size=3, stride=2, padding='same'
-        )
-        self.ga_pool = nn.AdaptiveAvgPool2d(1)
-        self.flat = nn.Flatten()
-        self.linear = nn.Linear(32, num_classes)
-
-    def forward(self, x):
-        # reduce dimensions
-        x = self.conv_1(x)
-        x = self.conv_2(x)
-        x = self.conv_3(x)
+        x = self.conv_layers(x)
         x = self.ga_pool(x)
 
         # flatten output
@@ -130,6 +92,7 @@ class SepResNetEncoder(nn.Module):
         self.block_2 = ResidualBlock(**arch_dict["block_2"])
         self.block_3 = ResidualBlock(**arch_dict["block_3"])
         self.block_4 = ResidualBlock(**arch_dict["block_4"])
+        self._out_channels = arch_dict["block_4"]["out_channels"]
 
     def forward(self, x):
         x = self.conv_1(x)
